@@ -20,6 +20,7 @@
 #include <pwd.h>
 #include <time.h>
 #include <limits.h>
+#include <sys/wait.h>
 #include "md5.h"
 #include "osp2p.h"
 
@@ -758,14 +759,69 @@ int main(int argc, char *argv[])
 	listen_task = start_listen();
 	register_files(tracker_task, myalias);
 
+	// Keep track of downloads in progress.
+	int dl_child;
+	dl_child = 0;
+
 	// First, download files named on command line.
 	for (; argc > 1; argc--, argv++)
+	{
+		// parallel downloads
 		if ((t = start_download(tracker_task, argv[1])))
-			task_download(t, tracker_task);
+		{
+			pid_t pid;
+			pid = fork();
+			if(pid < 0)
+			{
+				fprintf(stderr, "Error forking download!\n");
+				// do not exit, just try again
+				continue;
+			}
+			if(pid == 0)
+			{
+				task_download(t, tracker_task);
+				_exit(0);
+			}
+			if(pid > 0)
+			{
+				dl_child++;
+				task_free(t);
+			}
+
+		}
+	}
+
+	// wait for all downloads to finish, reap the children
+	while(dl_child > 0)
+	{
+		waitpid(-1, NULL, 0);
+		dl_child--;
+	}
 
 	// Then accept connections from other peers and upload files to them!
 	while ((t = task_listen(listen_task)))
-		task_upload(t);
+	{
+		// reap an upload process but do not busy wait
+		waitpid(-1, NULL, WNOHANG);
+		pid_t pid;
+		pid = fork();
+
+		if(pid < 0)
+		{
+			fprintf(stderr, "Error forking upload!\n");
+			// do not exit, just try again
+			continue;
+		}
+		if(pid == 0)
+		{
+			task_upload(t);
+			_exit(0);
+		}
+		if(pid > 0)
+		{
+			task_free(t);
+		}
+	}
 
 	return 0;
 }
