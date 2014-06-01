@@ -24,17 +24,57 @@ Email: mvojvodic@ucla.edu
 
 # EXERCISE 1: What method you used to make your peer download and upload
 #    files in parallel?  (~1-3 sentences)
-
+We used child processes (via fork) to parallelize peer download and upload.
+First, we download all files, then we upload all files. After forking 
+downloads, reap all the children at the end; after forking uploads, reap
+with WNOHANG in order to run as many uploads as possible.
 # EXERCISE 2A: What conditions did you find and fix that would have
 #    triggered a buffer overrun bug?  (~1-3 sentences each)
-
+In start_download and task_download, fixed a condition where a filename
+of size greater that FILENAMESIZ could be copied into the task struct and 
+cause problems. Used strncpy instead of strcpy.
 # EXERCISE 2B: What other robustness problems did you fix?  (~1-3 sentences
 #    each)
-
+One problem we fixed was serving files only from the current directory - 
+this fixes security issues with accessing private files. 
+Another problem we fixed was limiting the maximum file size - we don't want 
+evil peers to fill up our memory. 
+We also increased the TASKBUFSIZ in order to accomodate more peers.
 # EXERCISE 3: Describe the attacks you implemented for "evil mode".  Why
 #    are they attacks?  (~3-10 sentences each)
+Upload attacks:
+- Infinite file size
+This attack uploads files of infinite size, but can also be configured
+to send corrupted data files. We do so by writing an infinite amount of 
+data to the peer file descriptor. The peer will keep storing the data (since
+peer will believe it is legitimate) and will use up all its disk space.
 
+- Corrupt data
+This attack uploads a file different from what was requested. 
+Specifically, we upload random bits from /dev/random in order to attack
+our peers. Opening the file can cause havoc on the peer's machine.
+
+Download attacks:
+- accessing folders
+This attack attempts to access files outside of the uploader's current 
+directory. A malicious coder could attempt to access the answers.txt
+file by sending a request "GET ../answers.txt OSP2P". This attack 
+assumes that each peer is running with the same application structure
+as ours.
+
+- long file names (buffer overflow)
+This attack attempts to overflow the buffer of the uploading peer by 
+sending a request with a filename of length greater than FILENAMESIZ.
+It works on peers that do not check the length of the filename before 
+copying it to the task's disk_filename.
+
+- Denial of Service (DoS)
+This attack attempts to make the uploader unable to serve requests by
+good peers. The attack sends many GET requests to the uploader, thus 
+hogging its resources and preoccupying it with serving us instead of 
+peers who legitimately need the files. 
 # Extra credit problems
 #Extra credit problem: none
 
 # Add any other information you'd like us to know below this line.
+To find the code to any exercise, search EXERCISE [NUM] in osppeer.c.

